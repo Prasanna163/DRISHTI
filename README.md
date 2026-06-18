@@ -122,6 +122,18 @@ Run the actual LC recovery workflow:
 python .\scripts\drishti.py tce-recovery --batch-size 50 --balanced --products lc
 ```
 
+Run the same validation through the official STScI sector `.sh` manifests:
+
+```powershell
+python .\scripts\drishti.py tce-recovery `
+  --batch-size 50 `
+  --balanced `
+  --products lc `
+  --download-method manifest
+```
+
+That path streams sector manifests, downloads matching LC FITS files into `data/drishti/raw/lc/`, deletes each cached `.sh` after parsing, runs BLS recovery, and writes plots.
+
 Primary outputs:
 
 ```text
@@ -129,6 +141,12 @@ outputs/target_lists/tce_recovery_batch_50.csv
 outputs/tables/tce_download_status_50.csv
 outputs/tables/tce_recovery_results_50.csv
 outputs/plots/tce_recovery_50/
+```
+
+In `--download-method manifest` mode, the download status table is:
+
+```text
+outputs/drishti/tables/tce_manifest_download_status_50.csv
 ```
 
 The recovery table includes:
@@ -171,6 +189,45 @@ processing_failed
 ```
 
 ## STScI Manifest Planning
+
+There are two download paths:
+
+```text
+tce-recovery
+```
+
+Uses MAST product lookup for the selected TCE target rows. This is the easiest end-to-end validation command.
+
+```text
+stream-manifest / plan-manifest / download-plan
+```
+
+Uses the official STScI sector-wise `.sh` cURL manifests.
+
+For the workflow where DRISHTI downloads one `.sh`, parses the matching LC URLs, downloads those products, deletes the cached `.sh`, and moves to the next script, use:
+
+```powershell
+python .\scripts\drishti.py stream-manifest `
+  --resource-type light_curve `
+  --sectors 1,2 `
+  --target-list outputs\target_lists\tce_recovery_batch_50.csv `
+  --products lc `
+  --status outputs\drishti\tables\stream_lc_status.csv
+```
+
+Dry-run that same flow first:
+
+```powershell
+python .\scripts\drishti.py stream-manifest `
+  --resource-type light_curve `
+  --sectors 1,2 `
+  --target-list outputs\target_lists\tce_recovery_batch_50.csv `
+  --products lc `
+  --limit 5 `
+  --dry-run
+```
+
+By default, `stream-manifest` deletes each cached `.sh` after it has been parsed. Add `--keep-scripts` only when you want to inspect or debug the raw cURL manifest.
 
 Build a normalized download plan from a sector-wise LC cURL script:
 

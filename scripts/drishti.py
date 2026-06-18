@@ -12,6 +12,7 @@ from urllib.parse import urljoin
 import pandas as pd
 import requests
 from bs4 import BeautifulSoup
+from tqdm import tqdm
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
@@ -85,6 +86,12 @@ def build_parser() -> argparse.ArgumentParser:
         default="lc",
         help="Comma-separated products for download stage; default is lc.",
     )
+    pipeline_parser.add_argument(
+        "--download-method",
+        choices=["mast", "manifest"],
+        default="mast",
+        help="Use MAST product lookup or streamed STScI .sh manifests for downloads.",
+    )
     pipeline_parser.add_argument("--dry-run", action="store_true", help="Print planned commands without running them.")
     pipeline_parser.add_argument("--skip-discover", action="store_true", help="Do not refresh the STScI resource index.")
     pipeline_parser.add_argument("--skip-download", action="store_true", help="Reuse local products only.")
@@ -117,6 +124,27 @@ def build_parser() -> argparse.ArgumentParser:
     download_parser.add_argument("--retry-failed", action="store_true")
     download_parser.add_argument("--dry-run", action="store_true")
 
+    stream_parser = subparsers.add_parser(
+        "stream-manifest",
+        help=(
+            "Fetch STScI cURL scripts one at a time, download matching files, "
+            "delete each cached .sh, and continue."
+        ),
+    )
+    stream_parser.add_argument("--resource-index", type=Path, default=RESOURCE_INDEX)
+    stream_parser.add_argument("--resource-type", default="light_curve")
+    stream_parser.add_argument("--sectors", default="", help="Comma-separated sectors to include.")
+    stream_parser.add_argument("--program-id", default="", help="GI program ID for guest_investigator resources.")
+    stream_parser.add_argument("--target-list", type=Path, default=None, help="Optional TIC/sector target CSV filter.")
+    stream_parser.add_argument("--products", default="lc", help="Comma-separated product filters: lc,tp,dvr,dvt,other.")
+    stream_parser.add_argument("--product-root", type=Path, default=DATA_ROOT / "raw")
+    stream_parser.add_argument("--status", type=Path, default=OUTPUT_ROOT / "tables" / "stream_manifest_status.csv")
+    stream_parser.add_argument("--limit", type=int, default=None, help="Maximum product rows to consider across scripts.")
+    stream_parser.add_argument("--timeout", type=int, default=120)
+    stream_parser.add_argument("--retry-failed", action="store_true")
+    stream_parser.add_argument("--keep-scripts", action="store_true", help="Keep cached .sh files after processing.")
+    stream_parser.add_argument("--dry-run", action="store_true")
+
     return parser
 
 
@@ -148,6 +176,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "download-plan":
         print_splash()
         return download_plan_command(args)
+    if args.command == "stream-manifest":
+        print_splash()
+        return stream_manifest_command(args)
     raise ValueError(f"Unknown command: {args.command}")
 
 
@@ -332,7 +363,12 @@ def run_tce_recovery_pipeline(args) -> int:
     starter = ROOT / "outputs" / "target_lists" / "tce_starter_validation_targets.csv"
     batch = ROOT / "outputs" / "target_lists" / f"tce_recovery_batch_{args.batch_size}.csv"
     recovery = ROOT / "outputs" / "tables" / f"tce_recovery_results_{args.batch_size}.csv"
-    download_status = ROOT / "outputs" / "tables" / f"tce_download_status_{args.batch_size}.csv"
+    if args.download_method == "manifest":
+        download_status = OUTPUT_ROOT / "tables" / f"tce_manifest_download_status_{args.batch_size}.csv"
+        fits_dir = DATA_ROOT / "raw" / "lc"
+    else:
+        download_status = ROOT / "outputs" / "tables" / f"tce_download_status_{args.batch_size}.csv"
+        fits_dir = ROOT / "data" / "raw" / "tce_products" / "lc"
     plot_dir = ROOT / "outputs" / "plots" / f"tce_recovery_{args.batch_size}"
 
     commands = [
@@ -346,18 +382,46 @@ def run_tce_recovery_pipeline(args) -> int:
         write_batch_file(starter, batch, batch_size=args.batch_size, balanced=args.balanced)
 
     if not args.skip_download:
-        commands.append(
-            [
-                sys.executable,
-                str(ROOT / "scripts" / "05_download_tce_products.py"),
-                "--targets",
-                str(batch),
-                "--products",
-                args.products,
-                "--status",
-                str(download_status),
-            ]
-        )
+        if args.download_method == "manifest":
+            if parse_product_types_for_manifest_pipeline(args.products) != {"lc"}:
+                raise ValueError("Manifest-backed tce-recovery currently supports --products lc.")
+            sectors_arg = batch_sectors_arg(
+                starter,
+                batch,
+                batch_size=args.batch_size,
+                balanced=args.balanced,
+                dry_run=args.dry_run,
+            )
+            commands.append(
+                [
+                    sys.executable,
+                    str(Path(__file__).resolve()),
+                    "stream-manifest",
+                    "--resource-type",
+                    "light_curve",
+                    "--sectors",
+                    sectors_arg,
+                    "--target-list",
+                    str(batch),
+                    "--products",
+                    "lc",
+                    "--status",
+                    str(download_status),
+                ]
+            )
+        else:
+            commands.append(
+                [
+                    sys.executable,
+                    str(ROOT / "scripts" / "05_download_tce_products.py"),
+                    "--targets",
+                    str(batch),
+                    "--products",
+                    args.products,
+                    "--status",
+                    str(download_status),
+                ]
+            )
 
     commands.append(
         [
@@ -365,6 +429,8 @@ def run_tce_recovery_pipeline(args) -> int:
             str(ROOT / "scripts" / "06_run_tce_recovery.py"),
             "--targets",
             str(batch),
+            "--fits-dir",
+            str(fits_dir),
             "--output",
             str(recovery),
         ]
@@ -377,6 +443,8 @@ def run_tce_recovery_pipeline(args) -> int:
                 str(ROOT / "scripts" / "07_plot_tce_recovery.py"),
                 "--recovery",
                 str(recovery),
+                "--fits-dir",
+                str(fits_dir),
                 "--output-dir",
                 str(plot_dir),
                 "--diagnostics",
@@ -443,6 +511,29 @@ def select_batch(frame: pd.DataFrame, *, batch_size: int, balanced: bool) -> pd.
     return batch.head(batch_size).copy()
 
 
+def batch_sectors_arg(starter: Path, batch: Path, *, batch_size: int, balanced: bool, dry_run: bool) -> str:
+    if dry_run and starter.exists():
+        frame = select_batch(pd.read_csv(starter), batch_size=batch_size, balanced=balanced)
+    elif batch.exists():
+        frame = pd.read_csv(batch)
+    elif starter.exists():
+        frame = select_batch(pd.read_csv(starter), batch_size=batch_size, balanced=balanced)
+    else:
+        raise FileNotFoundError(f"Cannot infer sectors without {starter} or {batch}.")
+
+    sectors = sorted(frame["sector"].dropna().astype(int).unique())
+    if not sectors:
+        raise ValueError("Selected batch has no sectors.")
+    return ",".join(str(sector) for sector in sectors)
+
+
+def parse_product_types_for_manifest_pipeline(value: str) -> set[str]:
+    products = {item.strip().lower() for item in value.split(",") if item.strip()}
+    if not products:
+        raise ValueError("At least one product type is required.")
+    return products
+
+
 def run_or_print(command: list[str], *, dry_run: bool) -> None:
     pretty = " ".join(quote_arg(part) for part in command)
     if dry_run:
@@ -464,13 +555,12 @@ def build_download_plan_command(args) -> int:
         print("Run: python .\\scripts\\drishti.py discover")
         return 1
     index = pd.read_csv(args.resource_index)
-    selected = index[index["resource_type"] == args.resource_type].copy()
-
-    if args.sectors:
-        sectors = {int(item.strip()) for item in args.sectors.split(",") if item.strip()}
-        selected = selected[selected["sector"].fillna(-1).astype(int).isin(sectors)]
-    if args.program_id:
-        selected = selected[selected["program_id"].astype(str).str.upper() == args.program_id.upper()]
+    selected = select_resource_scripts(
+        index,
+        resource_type=args.resource_type,
+        sectors_arg=args.sectors,
+        program_id=args.program_id,
+    )
 
     if selected.empty:
         print("No matching resource scripts found.")
@@ -508,6 +598,24 @@ def build_download_plan_command(args) -> int:
         plan.to_csv(args.output, index=False)
         print(f"Wrote download plan: {args.output.resolve()}")
     return 0
+
+
+def select_resource_scripts(
+    index: pd.DataFrame,
+    *,
+    resource_type: str,
+    sectors_arg: str,
+    program_id: str,
+) -> pd.DataFrame:
+    selected = index[index["resource_type"] == resource_type].copy()
+
+    if sectors_arg:
+        sectors = {int(item.strip()) for item in sectors_arg.split(",") if item.strip()}
+        selected = selected[selected["sector"].fillna(-1).astype(int).isin(sectors)]
+    if program_id:
+        selected = selected[selected["program_id"].astype(str).str.upper() == program_id.upper()]
+
+    return selected.reset_index(drop=True)
 
 
 def fetch_manifest_script(url: str, *, timeout: int) -> str:
@@ -562,18 +670,209 @@ def filter_plan_to_targets(plan: pd.DataFrame, targets: pd.DataFrame) -> pd.Data
     if not {"tic_id", "sector"}.issubset(targets.columns):
         raise ValueError("Target list must contain tic_id and sector columns.")
     target_keys = set(zip(targets["tic_id"].astype(int), targets["sector"].astype(int)))
-    return plan[
-        plan.apply(
-            lambda row: (
-                int(row["tic_id"]),
-                int(row["parsed_sector"] or row["sector"]),
-            )
-            in target_keys
-            if str(row.get("tic_id", "")).strip()
-            else False,
-            axis=1,
+    return plan[plan.apply(lambda row: plan_row_matches_targets(row, target_keys), axis=1)].copy()
+
+
+def plan_row_matches_targets(row: pd.Series, target_keys: set[tuple[int, int]]) -> bool:
+    tic_id = first_present_value(row.get("tic_id", ""))
+    sector = first_present_value(row.get("parsed_sector", ""), row.get("sector", ""))
+    if tic_id is None or sector is None:
+        return False
+    return (int(tic_id), int(sector)) in target_keys
+
+
+def first_present_value(*values):
+    for value in values:
+        if pd.isna(value):
+            continue
+        text = str(value).strip()
+        if text:
+            return value
+    return None
+
+
+def stream_manifest_command(args) -> int:
+    init_store(dry_run=args.dry_run)
+    if not args.resource_index.exists():
+        print(f"Resource index missing: {args.resource_index}")
+        print("Run: python .\\scripts\\drishti.py discover")
+        return 1
+
+    index = pd.read_csv(args.resource_index)
+    selected = select_resource_scripts(
+        index,
+        resource_type=args.resource_type,
+        sectors_arg=args.sectors,
+        program_id=args.program_id,
+    )
+    if selected.empty:
+        print("No matching resource scripts found.")
+        return 1
+
+    product_filters = parse_manifest_product_filters(args.products)
+    target_rows = pd.read_csv(args.target_list) if args.target_list is not None else None
+    existing_status = read_status_table(args.status)
+    completed = completed_keys(existing_status, retry_failed=args.retry_failed)
+
+    total_considered = 0
+    new_status_rows: list[dict] = []
+    failures = 0
+
+    print(f"Manifest scripts selected: {len(selected)}")
+    print(f"Products: {', '.join(sorted(product_filters))}")
+    if args.target_list is not None:
+        print(f"Target filter: {args.target_list}")
+    if args.limit is not None:
+        print(f"Row limit: {args.limit}")
+
+    for script_index, resource in enumerate(selected.itertuples(index=False), start=1):
+        if args.limit is not None and total_considered >= args.limit:
+            break
+
+        print(
+            f"\n[{script_index}/{len(selected)}] {resource.script_name} "
+            f"({resource.resource_type}, sector {resource.sector})",
+            flush=True,
         )
-    ].copy()
+        script_path = DATA_ROOT / "manifests" / "scripts" / str(resource.script_name)
+
+        try:
+            script_text = fetch_manifest_script(str(resource.url), timeout=args.timeout)
+            if not args.dry_run:
+                script_path.parent.mkdir(parents=True, exist_ok=True)
+                script_path.write_text(script_text, encoding="utf-8")
+
+            plan_rows = []
+            for item in parse_curl_manifest(script_text):
+                item.update(
+                    {
+                        "resource_type": resource.resource_type,
+                        "sector": int(resource.sector) if pd.notna(resource.sector) else "",
+                        "program_id": resource.program_id if pd.notna(resource.program_id) else "",
+                        "manifest_script": resource.script_name,
+                    }
+                )
+                plan_rows.append(item)
+
+            plan = pd.DataFrame(plan_rows)
+            if not plan.empty:
+                plan = plan[plan["product"].astype(str).isin(product_filters)].copy()
+            if target_rows is not None and not plan.empty:
+                plan = filter_plan_to_targets(plan, target_rows)
+            if args.limit is not None and not plan.empty:
+                remaining = max(0, args.limit - total_considered)
+                plan = plan.head(remaining)
+
+            print(f"  matching product rows: {len(plan)}", flush=True)
+            if plan.empty:
+                continue
+
+            for item in tqdm(list(plan.itertuples(index=False)), desc="  Downloads", unit="file", file=sys.stdout):
+                status_row_data = process_manifest_plan_item(
+                    item,
+                    product_root=args.product_root,
+                    completed=completed,
+                    timeout=args.timeout,
+                    dry_run=args.dry_run,
+                )
+                total_considered += 1
+                new_status_rows.append(status_row_data)
+                if status_row_data["status"] == "failed":
+                    failures += 1
+
+                if status_row_data["status"] in {"downloaded", "exists", "resume_skipped"} or (
+                    status_row_data["status"] == "failed" and not args.retry_failed
+                ):
+                    completed.add(
+                        (
+                            str(status_row_data["manifest_script"]),
+                            int(status_row_data["line_number"]),
+                            str(status_row_data["filename"]),
+                        )
+                    )
+
+            if not args.dry_run:
+                combined = pd.concat(
+                    [existing_status, pd.DataFrame(new_status_rows)],
+                    ignore_index=True,
+                )
+                write_plan_status(args.status, combined.to_dict("records"))
+        finally:
+            if not args.dry_run and not args.keep_scripts and script_path.exists():
+                script_path.unlink()
+                print(f"  deleted manifest script: {script_path.name}", flush=True)
+
+    frame = pd.DataFrame(new_status_rows)
+    print("\nStream manifest summary")
+    print(f"Product rows considered: {total_considered}")
+    if not frame.empty:
+        print(frame["status"].value_counts().to_string())
+    print(f"Failures: {failures}")
+    if not args.dry_run:
+        print(f"Status log: {args.status.resolve()}")
+    return 1 if failures else 0
+
+
+def parse_manifest_product_filters(value: str) -> set[str]:
+    products = {item.strip().lower() for item in value.split(",") if item.strip()}
+    allowed = {"lc", "tp", "dvr", "dvt", "other"}
+    unknown = sorted(products - allowed)
+    if unknown:
+        raise ValueError(f"Unknown manifest product(s): {', '.join(unknown)}")
+    if not products:
+        raise ValueError("At least one product filter is required.")
+    return products
+
+
+def process_manifest_plan_item(
+    item,
+    *,
+    product_root: Path,
+    completed: set[tuple[str, int, str]],
+    timeout: int,
+    dry_run: bool,
+) -> dict:
+    key = (str(item.manifest_script), int(item.line_number), str(item.filename))
+    product = str(item.product)
+    destination = product_root / product / str(item.filename)
+    status = "planned" if dry_run else "downloaded"
+    message = ""
+
+    if key in completed:
+        status = "resume_skipped"
+    elif destination.exists() and destination.stat().st_size > 0:
+        status = "exists"
+    elif not dry_run:
+        try:
+            download_url(str(item.url), destination, timeout=timeout)
+            if destination.suffix.lower() == ".fits":
+                validate_fits(destination)
+        except Exception as exc:
+            status = "failed"
+            message = f"{type(exc).__name__}: {exc}"
+
+    return {
+        "manifest_script": item.manifest_script,
+        "line_number": int(item.line_number),
+        "filename": item.filename,
+        "product": product,
+        "tic_id": item.tic_id,
+        "sector": resolved_plan_sector(item),
+        "url": item.url,
+        "local_path": str(destination),
+        "status": status,
+        "message": message,
+    }
+
+
+def resolved_plan_sector(item) -> int | str:
+    parsed_sector = getattr(item, "parsed_sector", "")
+    if pd.notna(parsed_sector) and str(parsed_sector).strip():
+        return int(parsed_sector)
+    sector = getattr(item, "sector", "")
+    if pd.notna(sector) and str(sector).strip():
+        return int(sector)
+    return ""
 
 
 def download_plan_command(args) -> int:

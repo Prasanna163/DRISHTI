@@ -12,6 +12,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from tqdm import tqdm
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
@@ -82,7 +83,8 @@ def main(argv: list[str] | None = None) -> int:
         mode=args.diagnostics,
         top_direct=args.top_direct_diagnostics,
     )
-    for row in diagnostic_rows.itertuples(index=False):
+    print(f"Generating {len(diagnostic_rows)} target diagnostic plot(s)...", flush=True)
+    for row in tqdm(list(diagnostic_rows.itertuples(index=False)), desc="Diagnostic plots", unit="plot", file=sys.stdout):
         fits_path = find_lc_fits(args.fits_dir, int(row.tic_id), int(row.sector))
         if fits_path is None:
             continue

@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 
 import pandas as pd
+from tqdm import tqdm
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
@@ -47,7 +48,8 @@ def main(argv: list[str] | None = None) -> int:
         targets = targets.head(args.limit)
 
     rows = []
-    for target in targets.itertuples(index=False):
+    print(f"Running BLS recovery for {len(targets)} target row(s)...", flush=True)
+    for target in tqdm(list(targets.itertuples(index=False)), desc="Recovery targets", unit="target", file=sys.stdout):
         row = base_recovery_row(target)
         fits_path = find_lc_fits(args.fits_dir, int(target.tic_id), int(target.sector))
         if fits_path is None:
