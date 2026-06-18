@@ -1,0 +1,11 @@
+project:
+  name: tess-exoplanet-detector
+
+paths:
+  raw_fits: data/raw/fits
+  tic_catalog: data/raw/tic
+  labels: data/raw/labels
+  processed: data/processed
+  features: data/features
+  outputs: outputs
+
