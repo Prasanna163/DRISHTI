@@ -10,6 +10,7 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
+from drishti_store import RESULT_PLOT_ROOT, RESULT_TABLE_ROOT
 from data_access.load_fits import find_fits
 from detection.run_bls import run_bls_search
 from preprocessing.clean_lightcurve import load_clean_flattened_lightcurve
@@ -28,19 +29,19 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--candidates",
         type=Path,
-        default=Path("outputs/candidates/bls_candidates.csv"),
+        default=RESULT_TABLE_ROOT / "bls_candidates.csv",
         help="CSV path for BLS candidate summary.",
     )
     parser.add_argument(
         "--periodogram-dir",
         type=Path,
-        default=Path("outputs/plots/periodograms"),
+        default=RESULT_PLOT_ROOT / "periodograms",
         help="Directory for BLS periodogram plots.",
     )
     parser.add_argument(
         "--phase-dir",
         type=Path,
-        default=Path("outputs/plots/phase_folded"),
+        default=RESULT_PLOT_ROOT / "phase_folded",
         help="Directory for BLS phase-folded plots.",
     )
     parser.add_argument("--dpi", type=int, default=300, help="PNG resolution.")
@@ -124,4 +125,3 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

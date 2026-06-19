@@ -2,16 +2,22 @@ from __future__ import annotations
 
 import argparse
 import re
+import sys
 from pathlib import Path
 
 import pandas as pd
 
-
 ROOT = Path(__file__).resolve().parents[1]
+SRC = ROOT / "src"
+if str(SRC) not in sys.path:
+    sys.path.insert(0, str(SRC))
+
+from drishti_store import TARGET_ROOT
+
 DEFAULT_REF_DIR = ROOT / "data" / "Ref"
-DEFAULT_OUTPUT = ROOT / "outputs" / "target_lists" / "tce_positive_targets.csv"
-DEFAULT_STARTER_OUTPUT = ROOT / "outputs" / "target_lists" / "tce_starter_validation_targets.csv"
-DEFAULT_FIRST_BATCH_OUTPUT = ROOT / "outputs" / "target_lists" / "tce_first_recovery_batch.csv"
+DEFAULT_OUTPUT = TARGET_ROOT / "tce_positive_targets.csv"
+DEFAULT_STARTER_OUTPUT = TARGET_ROOT / "tce_starter_validation_targets.csv"
+DEFAULT_FIRST_BATCH_OUTPUT = TARGET_ROOT / "tce_first_recovery_batch.csv"
 
 FIRST_RECOVERY_TIC_IDS = [
     183979262,

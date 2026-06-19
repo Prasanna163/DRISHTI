@@ -9,10 +9,15 @@ outputs/
 data/processed/
 data/features/
 data/raw/
-data/drishti/metadata/*.csv
+data/drishti/metadata/
+data/drishti/catalogs/*.csv
+data/drishti/targets/*.csv
 data/drishti/manifests/scripts/
 data/drishti/manifests/plans/*.csv
 data/drishti/raw/
+data/drishti/downloads/
+data/drishti/results/
+data/drishti/logs/
 data/drishti/processed/
 report/*.pdf
 report/*.aux

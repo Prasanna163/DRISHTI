@@ -7,5 +7,8 @@ paths:
   labels: data/raw/labels
   processed: data/processed
   features: data/features
-  outputs: outputs
-
+  # Canonical DRISHTI store (see src/drishti_store.py)
+  downloads: data/drishti/downloads
+  results: data/drishti/results
+  targets: data/drishti/targets
+  logs: data/drishti/logs

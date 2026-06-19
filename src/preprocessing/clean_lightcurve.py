@@ -24,8 +24,21 @@ def load_clean_flattened_lightcurve(
     scatter_window: int = 101,
     scatter_sigma: float = 5.0,
     apply_known_systematic_masks: bool = True,
+    mask_period: float | None = None,
+    mask_t0: float | None = None,
+    mask_duration_days: float | None = None,
+    mask_width_durations: float = 1.0,
 ) -> CleanedLightCurve:
-    """Load a TESS light curve and prepare it for transit-search inspection."""
+    """Load a TESS light curve and prepare it for transit-search inspection.
+
+    If a transit ephemeris (``mask_period``, ``mask_t0``, ``mask_duration_days``) is supplied,
+    the in-transit cadences are excluded from the Savitzky-Golay trend fit during flattening.
+    This is essential for accurate *depth* recovery: a transit that occupies a non-trivial
+    fraction of the flatten window is otherwise partially absorbed into the trend and its depth
+    is suppressed (observed ~2-3x suppression with the default 401-cadence window). Detection
+    (period/epoch/duration) is unaffected, so the standard call (no mask) is fine for BLS, and
+    the masked call is used for the parameter-fitting pass.
+    """
     lc = lk.read(str(fits_path))
     original_count = len(lc)
 
@@ -37,7 +50,15 @@ def load_clean_flattened_lightcurve(
     lc = lc.normalize()
     lc = lc.remove_outliers(sigma=5)
     window_length = flatten_window_for_count(len(lc), preferred=flatten_window_length)
-    flat_lc = lc.flatten(window_length=window_length)
+    transit_mask = _build_transit_mask(
+        np.asarray(lc.time.value, dtype=float),
+        period=mask_period,
+        t0=mask_t0,
+        duration_days=mask_duration_days,
+        width_durations=mask_width_durations,
+    )
+    # lightkurve excludes cadences where mask is True from the trend fit.
+    flat_lc = lc.flatten(window_length=window_length, mask=transit_mask)
 
     time = np.asarray(flat_lc.time.value, dtype=float)
     flux = np.asarray(flat_lc.flux.value, dtype=float)
@@ -88,6 +109,24 @@ def remove_high_scatter_regions(
 
     good = (rolling_mad < sigma * global_mad).fillna(True).to_numpy()
     return time[good], flux[good]
+
+
+def _build_transit_mask(
+    time: np.ndarray,
+    *,
+    period: float | None,
+    t0: float | None,
+    duration_days: float | None,
+    width_durations: float = 1.0,
+) -> np.ndarray | None:
+    """Boolean mask (True = in-transit) for excluding transits from the flatten trend fit."""
+    if period is None or t0 is None or duration_days is None:
+        return None
+    if not (period > 0 and duration_days > 0):
+        return None
+    phase = ((time - t0 + 0.5 * period) % period) / period - 0.5
+    half_window_phase = 0.5 * width_durations * duration_days / period
+    return np.abs(phase) <= half_window_phase
 
 
 def known_systematic_mask(time: np.ndarray, fits_path: Path) -> np.ndarray:

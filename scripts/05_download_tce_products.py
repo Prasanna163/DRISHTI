@@ -16,11 +16,12 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from data_access.load_fits import validate_fits
+from drishti_store import DOWNLOAD_ROOT, RESULT_TABLE_ROOT, TARGET_ROOT
 
 
-DEFAULT_TARGETS = ROOT / "outputs" / "target_lists" / "tce_first_recovery_batch.csv"
-DEFAULT_OUTPUT_DIR = ROOT / "data" / "raw" / "tce_products"
-DEFAULT_STATUS = ROOT / "outputs" / "tables" / "tce_download_status.csv"
+DEFAULT_TARGETS = TARGET_ROOT / "tce_first_recovery_batch.csv"
+DEFAULT_OUTPUT_DIR = DOWNLOAD_ROOT
+DEFAULT_STATUS = RESULT_TABLE_ROOT / "tce_download_status.csv"
 
 PRODUCT_SUFFIXES = {
     "lc": "_lc.fits",

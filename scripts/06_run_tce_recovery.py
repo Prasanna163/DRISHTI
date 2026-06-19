@@ -16,11 +16,12 @@ if str(SRC) not in sys.path:
 
 from detection.run_bls import run_bls_search
 from preprocessing.clean_lightcurve import load_clean_flattened_lightcurve
+from drishti_store import DOWNLOAD_LC_ROOT, RESULT_TABLE_ROOT, TARGET_ROOT
 
 
-DEFAULT_TARGETS = ROOT / "outputs" / "target_lists" / "tce_first_recovery_batch.csv"
-DEFAULT_FITS_DIR = ROOT / "data" / "raw" / "tce_products" / "lc"
-DEFAULT_OUTPUT = ROOT / "outputs" / "tables" / "tce_recovery_results.csv"
+DEFAULT_TARGETS = TARGET_ROOT / "tce_first_recovery_batch.csv"
+DEFAULT_FITS_DIR = DOWNLOAD_LC_ROOT
+DEFAULT_OUTPUT = RESULT_TABLE_ROOT / "tce_recovery_results.csv"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -38,6 +39,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--period-vetting-percent", type=float, default=0.1)
     parser.add_argument("--min-our-snr", type=float, default=7.0)
     parser.add_argument("--max-duration-ratio", type=float, default=3.0)
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Reprocess ALL targets from scratch (default: skip already-evaluated ones).",
+    )
     return parser
 
 
@@ -47,9 +53,27 @@ def main(argv: list[str] | None = None) -> int:
     if args.limit is not None:
         targets = targets.head(args.limit)
 
-    rows = []
-    print(f"Running BLS recovery for {len(targets)} target row(s)...", flush=True)
-    for target in tqdm(list(targets.itertuples(index=False)), desc="Recovery targets", unit="target", file=sys.stdout):
+    # Auto-skip already-evaluated targets (unless --force)
+    existing_rows: list[dict] = []
+    already_done: set[tuple[int, int]] = set()
+    if not args.force and args.output.exists():
+        existing_df = pd.read_csv(args.output)
+        evaluated_mask = existing_df["status"] == "evaluated"
+        for row in existing_df[evaluated_mask].itertuples(index=False):
+            already_done.add((int(row.tic_id), int(row.sector)))
+        existing_rows = existing_df.to_dict("records")
+        if already_done:
+            print(f"Found {len(already_done)} already-evaluated target(s), skipping them.", flush=True)
+
+    rows = list(existing_rows)
+    pending = [
+        target
+        for target in targets.itertuples(index=False)
+        if (int(target.tic_id), int(target.sector)) not in already_done
+    ]
+    print(f"Running BLS recovery for {len(pending)} target row(s) ({len(already_done)} skipped)...", flush=True)
+
+    for target in tqdm(pending, desc="Recovery targets", unit="target", file=sys.stdout):
         row = base_recovery_row(target)
         fits_path = find_lc_fits(args.fits_dir, int(target.tic_id), int(target.sector))
         if fits_path is None:
@@ -99,15 +123,44 @@ def main(argv: list[str] | None = None) -> int:
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     write_rows(args.output, rows)
-    recovered = sum(1 for row in rows if row.get("recovered_true_false") is True)
-    period_recovered = sum(1 for row in rows if row.get("period_recovered_true_false") is True)
-    evaluated = sum(1 for row in rows if row.get("status") == "evaluated")
-    print(f"Targets read: {len(targets)}")
-    print(f"Evaluated: {evaluated}")
-    print(f"Recovered: {recovered}")
-    print(f"Period recovered or alias/vetting: {period_recovered}")
-    print(f"Wrote: {args.output.resolve()}")
+    print_recovery_summary(rows, len(targets), args.output)
     return 0
+
+
+def print_recovery_summary(rows: list[dict], total_targets: int, output_path: Path) -> None:
+    """Print a detailed recovery rate summary."""
+    evaluated = sum(1 for r in rows if r.get("status") == "evaluated")
+    recovered = sum(1 for r in rows if r.get("recovered_true_false") is True)
+    period_recovered = sum(1 for r in rows if r.get("period_recovered_true_false") is True)
+    download_failed = sum(1 for r in rows if r.get("recovery_class") == "download_failed")
+    processing_failed = sum(1 for r in rows if r.get("recovery_class") == "processing_failed")
+    not_recovered = sum(1 for r in rows if r.get("recovery_class") == "not_recovered")
+
+    # Class breakdown
+    class_counts: dict[str, int] = {}
+    for r in rows:
+        cls = r.get("recovery_class", "unknown")
+        class_counts[cls] = class_counts.get(cls, 0) + 1
+
+    pct = lambda n, d: f"{100 * n / d:.1f}%" if d > 0 else "N/A"
+
+    print("\n" + "=" * 55)
+    print("  DRISHTI TCE Recovery Summary")
+    print("=" * 55)
+    print(f"  Targets in list:        {total_targets}")
+    print(f"  Evaluated (BLS ran):    {evaluated}")
+    print(f"  Recovered (direct+alias): {recovered}  ({pct(recovered, evaluated)})")
+    print(f"  Period recovered (all):   {period_recovered}  ({pct(period_recovered, evaluated)})")
+    print(f"  Not recovered:            {not_recovered}")
+    print(f"  Download failed:          {download_failed}")
+    print(f"  Processing failed:        {processing_failed}")
+    print("-" * 55)
+    print("  Recovery class breakdown:")
+    for cls in sorted(class_counts, key=lambda c: -class_counts[c]):
+        print(f"    {cls:40s} {class_counts[cls]:>4d}")
+    print("-" * 55)
+    print(f"  Output: {output_path.resolve()}")
+    print("=" * 55)
 
 
 def base_recovery_row(target) -> dict:

@@ -20,11 +20,21 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from data_access.load_fits import validate_fits
-
-DATA_ROOT = ROOT / "data" / "drishti"
-OUTPUT_ROOT = ROOT / "outputs" / "drishti"
-RESOURCE_INDEX = DATA_ROOT / "metadata" / "bulk_resource_index.csv"
-STORE_README = DATA_ROOT / "README.md"
+from drishti_store import (
+    DATA_ROOT,
+    DOWNLOAD_LC_ROOT,
+    DOWNLOAD_ROOT,
+    MANIFEST_PLAN_ROOT,
+    MANIFEST_SCRIPT_ROOT,
+    RESOURCE_INDEX,
+    RESULT_PLOT_ROOT,
+    RESULT_TABLE_ROOT,
+    STORE_README,
+    TARGET_ROOT,
+    migrate_legacy_outputs,
+    store_dirs,
+    store_tree_text,
+)
 
 GO_PAGE = "https://archive.stsci.edu/tess/bulk_downloads/bulk_downloads_go.html"
 SECTOR_PAGE = "https://archive.stsci.edu/tess/bulk_downloads/bulk_downloads_ffi-tp-lc-dv.html"
@@ -77,6 +87,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     pipeline_parser.add_argument("--batch-size", type=int, default=50, help="Target-sector rows to process.")
     pipeline_parser.add_argument(
+        "--batch-offset",
+        type=int,
+        default=0,
+        help="Skip this many selected target-sector rows before taking the batch.",
+    )
+    pipeline_parser.add_argument(
         "--balanced",
         action="store_true",
         help="Take an equal number of starter rows per sector where possible.",
@@ -96,6 +112,11 @@ def build_parser() -> argparse.ArgumentParser:
     pipeline_parser.add_argument("--skip-discover", action="store_true", help="Do not refresh the STScI resource index.")
     pipeline_parser.add_argument("--skip-download", action="store_true", help="Reuse local products only.")
     pipeline_parser.add_argument("--skip-plots", action="store_true", help="Skip recovery plot generation.")
+    pipeline_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Reprocess everything from scratch (default: skip already-done work).",
+    )
     pipeline_parser.add_argument("--top-direct-diagnostics", type=int, default=10)
 
     plan_parser = subparsers.add_parser(
@@ -107,7 +128,7 @@ def build_parser() -> argparse.ArgumentParser:
     plan_parser.add_argument("--sectors", default="", help="Comma-separated sectors to include.")
     plan_parser.add_argument("--program-id", default="", help="GI program ID for guest_investigator resources.")
     plan_parser.add_argument("--target-list", type=Path, default=None, help="Optional TIC/sector target CSV filter.")
-    plan_parser.add_argument("--output", type=Path, default=DATA_ROOT / "manifests" / "download_plan.csv")
+    plan_parser.add_argument("--output", type=Path, default=MANIFEST_PLAN_ROOT / "download_plan.csv")
     plan_parser.add_argument("--limit", type=int, default=None)
     plan_parser.add_argument("--dry-run", action="store_true")
     plan_parser.add_argument("--timeout", type=int, default=60)
@@ -116,9 +137,9 @@ def build_parser() -> argparse.ArgumentParser:
         "download-plan",
         help="Download files from a normalized DRISHTI download plan with resume/status logging.",
     )
-    download_parser.add_argument("--plan", type=Path, default=DATA_ROOT / "manifests" / "download_plan.csv")
-    download_parser.add_argument("--product-root", type=Path, default=DATA_ROOT / "raw")
-    download_parser.add_argument("--status", type=Path, default=OUTPUT_ROOT / "tables" / "download_plan_status.csv")
+    download_parser.add_argument("--plan", type=Path, default=MANIFEST_PLAN_ROOT / "download_plan.csv")
+    download_parser.add_argument("--product-root", type=Path, default=DOWNLOAD_ROOT)
+    download_parser.add_argument("--status", type=Path, default=RESULT_TABLE_ROOT / "download_plan_status.csv")
     download_parser.add_argument("--limit", type=int, default=None)
     download_parser.add_argument("--timeout", type=int, default=120)
     download_parser.add_argument("--retry-failed", action="store_true")
@@ -137,8 +158,8 @@ def build_parser() -> argparse.ArgumentParser:
     stream_parser.add_argument("--program-id", default="", help="GI program ID for guest_investigator resources.")
     stream_parser.add_argument("--target-list", type=Path, default=None, help="Optional TIC/sector target CSV filter.")
     stream_parser.add_argument("--products", default="lc", help="Comma-separated product filters: lc,tp,dvr,dvt,other.")
-    stream_parser.add_argument("--product-root", type=Path, default=DATA_ROOT / "raw")
-    stream_parser.add_argument("--status", type=Path, default=OUTPUT_ROOT / "tables" / "stream_manifest_status.csv")
+    stream_parser.add_argument("--product-root", type=Path, default=DOWNLOAD_ROOT)
+    stream_parser.add_argument("--status", type=Path, default=RESULT_TABLE_ROOT / "stream_manifest_status.csv")
     stream_parser.add_argument("--limit", type=int, default=None, help="Maximum product rows to consider across scripts.")
     stream_parser.add_argument("--timeout", type=int, default=120)
     stream_parser.add_argument("--retry-failed", action="store_true")
@@ -192,19 +213,7 @@ def print_splash() -> None:
 
 
 def init_store(*, dry_run: bool) -> None:
-    directories = [
-        DATA_ROOT / "metadata",
-        DATA_ROOT / "ref",
-        DATA_ROOT / "manifests" / "scripts",
-        DATA_ROOT / "manifests" / "plans",
-        DATA_ROOT / "raw" / "lc",
-        DATA_ROOT / "raw" / "tp",
-        DATA_ROOT / "raw" / "dv",
-        DATA_ROOT / "processed",
-        OUTPUT_ROOT / "tables",
-        OUTPUT_ROOT / "plots",
-        OUTPUT_ROOT / "logs",
-    ]
+    directories = store_dirs()
     print("DRISHTI store layout")
     for directory in directories:
         print(f"  {directory}")
@@ -217,22 +226,7 @@ def init_store(*, dry_run: bool) -> None:
 
 
 def storage_readme_text() -> str:
-    return """# DRISHTI Data Store
-
-This folder stores reproducible TESS bulk-download and recovery artifacts.
-
-- `metadata/`: scraped STScI resource indexes and source-page metadata.
-- `ref/`: official TCE/CDPP/reference CSVs.
-- `manifests/scripts/`: cached STScI `.sh` cURL scripts.
-- `manifests/plans/`: normalized download plans parsed from cURL scripts.
-- `raw/lc/`: downloaded light-curve FITS files.
-- `raw/tp/`: downloaded target-pixel FITS files.
-- `raw/dv/`: downloaded DV PDF/XML/FITS products.
-- `processed/`: future evidence-layer products.
-
-Existing project outputs remain under `outputs/`; DRISHTI-specific summaries are under
-`outputs/drishti/` when generated by the CLI.
-"""
+    return store_tree_text()
 
 
 def discover_resources(*, timeout: int) -> list[BulkResource]:
@@ -356,30 +350,50 @@ def write_resource_index(resources: list[BulkResource], path: Path) -> None:
 
 def run_tce_recovery_pipeline(args) -> int:
     init_store(dry_run=args.dry_run)
+
+    # Auto-migrate legacy outputs on every pipeline entry
+    if not args.dry_run:
+        actions = migrate_legacy_outputs(dry_run=False)
+        if actions:
+            print(f"Migrated {len(actions)} legacy output action(s) to data/drishti/results/")
+
     if not args.skip_discover:
         discover_cmd = [sys.executable, str(Path(__file__).resolve()), "discover"]
         run_or_print(discover_cmd, dry_run=args.dry_run)
 
-    starter = ROOT / "outputs" / "target_lists" / "tce_starter_validation_targets.csv"
-    batch = ROOT / "outputs" / "target_lists" / f"tce_recovery_batch_{args.batch_size}.csv"
-    recovery = ROOT / "outputs" / "tables" / f"tce_recovery_results_{args.batch_size}.csv"
+    starter = TARGET_ROOT / "tce_starter_validation_targets.csv"
+    batch_label = batch_output_label(args.batch_size, args.batch_offset)
+    batch = TARGET_ROOT / f"tce_recovery_batch_{batch_label}.csv"
+    recovery = RESULT_TABLE_ROOT / f"tce_recovery_results_{batch_label}.csv"
     if args.download_method == "manifest":
-        download_status = OUTPUT_ROOT / "tables" / f"tce_manifest_download_status_{args.batch_size}.csv"
-        fits_dir = DATA_ROOT / "raw" / "lc"
+        download_status = RESULT_TABLE_ROOT / f"tce_manifest_download_status_{batch_label}.csv"
+        fits_dir = DOWNLOAD_LC_ROOT
     else:
-        download_status = ROOT / "outputs" / "tables" / f"tce_download_status_{args.batch_size}.csv"
-        fits_dir = ROOT / "data" / "raw" / "tce_products" / "lc"
-    plot_dir = ROOT / "outputs" / "plots" / f"tce_recovery_{args.batch_size}"
+        download_status = RESULT_TABLE_ROOT / f"tce_download_status_{batch_label}.csv"
+        fits_dir = DOWNLOAD_LC_ROOT
+    plot_dir = RESULT_PLOT_ROOT / f"tce_recovery_{batch_label}"
 
     commands = [
         [sys.executable, str(ROOT / "scripts" / "select_tce_targets.py")],
     ]
 
     if args.dry_run:
-        print_batch_plan(starter, batch, batch_size=args.batch_size, balanced=args.balanced)
+        print_batch_plan(
+            starter,
+            batch,
+            batch_size=args.batch_size,
+            batch_offset=args.batch_offset,
+            balanced=args.balanced,
+        )
     else:
         run_or_print(commands[0], dry_run=False)
-        write_batch_file(starter, batch, batch_size=args.batch_size, balanced=args.balanced)
+        write_batch_file(
+            starter,
+            batch,
+            batch_size=args.batch_size,
+            batch_offset=args.batch_offset,
+            balanced=args.balanced,
+        )
 
     if not args.skip_download:
         if args.download_method == "manifest":
@@ -389,6 +403,7 @@ def run_tce_recovery_pipeline(args) -> int:
                 starter,
                 batch,
                 batch_size=args.batch_size,
+                batch_offset=args.batch_offset,
                 balanced=args.balanced,
                 dry_run=args.dry_run,
             )
@@ -423,18 +438,21 @@ def run_tce_recovery_pipeline(args) -> int:
                 ]
             )
 
-    commands.append(
-        [
-            sys.executable,
-            str(ROOT / "scripts" / "06_run_tce_recovery.py"),
-            "--targets",
-            str(batch),
-            "--fits-dir",
-            str(fits_dir),
-            "--output",
-            str(recovery),
-        ]
-    )
+    # Recovery always auto-skips already-evaluated targets;
+    # pass --force to reprocess from scratch
+    recovery_cmd = [
+        sys.executable,
+        str(ROOT / "scripts" / "06_run_tce_recovery.py"),
+        "--targets",
+        str(batch),
+        "--fits-dir",
+        str(fits_dir),
+        "--output",
+        str(recovery),
+    ]
+    if getattr(args, "force", False):
+        recovery_cmd.append("--force")
+    commands.append(recovery_cmd)
 
     if not args.skip_plots:
         commands.append(
@@ -458,66 +476,142 @@ def run_tce_recovery_pipeline(args) -> int:
     for command in commands[command_start:]:
         run_or_print(command, dry_run=args.dry_run)
 
-    print("\nDRISHTI pipeline artifacts")
-    print(f"  batch targets: {batch}")
-    print(f"  download status: {download_status}")
-    print(f"  recovery table: {recovery}")
-    print(f"  plots: {plot_dir}")
+    print("\n" + "=" * 60)
+    print("  DRISHTI Pipeline Complete")
+    print("=" * 60)
+    print(f"  Batch targets:     {batch}")
+    print(f"  Download status:   {download_status}")
+    print(f"  Recovery table:    {recovery}")
+    print(f"  Diagnostic plots:  {plot_dir}")
+    print("=" * 60)
     return 0
 
 
-def write_batch_file(starter: Path, output: Path, *, batch_size: int, balanced: bool) -> None:
+def batch_output_label(batch_size: int, batch_offset: int) -> str:
+    if batch_offset < 0:
+        raise ValueError("batch_offset must be non-negative.")
+    if batch_offset == 0:
+        return str(batch_size)
+    return f"{batch_size}_offset_{batch_offset}"
+
+
+def write_batch_file(starter: Path, output: Path, *, batch_size: int, batch_offset: int, balanced: bool) -> None:
     if not starter.exists():
         raise FileNotFoundError(f"Starter target list not found: {starter}")
     frame = pd.read_csv(starter)
-    batch = select_batch(frame, batch_size=batch_size, balanced=balanced)
+    batch = select_batch(frame, batch_size=batch_size, batch_offset=batch_offset, balanced=balanced)
     output.parent.mkdir(parents=True, exist_ok=True)
     batch.to_csv(output, index=False)
     print(f"Wrote batch target list: {output.resolve()}")
-    print(batch.groupby("sector").size().to_string())
+    if batch.empty:
+        print("No target rows selected for this batch.")
+    else:
+        print(batch.groupby("sector").size().to_string())
 
 
-def print_batch_plan(starter: Path, output: Path, *, batch_size: int, balanced: bool) -> None:
+def print_batch_plan(starter: Path, output: Path, *, batch_size: int, batch_offset: int, balanced: bool) -> None:
     print("\nBatch target plan")
     print(f"  input: {starter}")
     print(f"  output: {output}")
     print(f"  rows: {batch_size}")
+    print(f"  offset: {batch_offset}")
     print(f"  balanced: {balanced}")
     if starter.exists():
-        batch = select_batch(pd.read_csv(starter), batch_size=batch_size, balanced=balanced)
-        print(batch.groupby("sector").size().to_string())
+        batch = select_batch(pd.read_csv(starter), batch_size=batch_size, batch_offset=batch_offset, balanced=balanced)
+        if batch.empty:
+            print("No target rows selected for this batch.")
+        else:
+            print(batch.groupby("sector").size().to_string())
 
 
-def select_batch(frame: pd.DataFrame, *, batch_size: int, balanced: bool) -> pd.DataFrame:
+def select_batch(frame: pd.DataFrame, *, batch_size: int, batch_offset: int, balanced: bool) -> pd.DataFrame:
     if batch_size <= 0:
         raise ValueError("batch_size must be positive.")
+    if batch_offset < 0:
+        raise ValueError("batch_offset must be non-negative.")
     if not balanced:
-        return frame.head(batch_size).copy()
+        return frame.iloc[batch_offset : batch_offset + batch_size].copy()
 
+    ordered = balanced_order(frame, batch_size=batch_size)
+    return ordered.iloc[batch_offset : batch_offset + batch_size].copy()
+
+
+def balanced_order(frame: pd.DataFrame, *, batch_size: int) -> pd.DataFrame:
     sectors = sorted(frame["sector"].dropna().astype(int).unique())
     if not sectors:
-        return frame.head(batch_size).copy()
+        return frame.copy()
     per_sector = max(1, batch_size // len(sectors))
     remainder = batch_size % len(sectors)
-    pieces = []
-    for index, sector in enumerate(sectors):
-        take = per_sector + (1 if index < remainder else 0)
-        pieces.append(frame[frame["sector"].astype(int) == sector].head(take))
-    batch = pd.concat(pieces, ignore_index=True)
-    if len(batch) < batch_size:
-        used = set(zip(batch["tic_id"], batch["sector"]))
-        rest = frame[~frame.apply(lambda row: (row["tic_id"], row["sector"]) in used, axis=1)]
-        batch = pd.concat([batch, rest.head(batch_size - len(batch))], ignore_index=True)
-    return batch.head(batch_size).copy()
+    by_sector = {
+        sector: frame[frame["sector"].astype(int) == sector].copy().reset_index(drop=True)
+        for sector in sectors
+    }
+    cursors = {sector: 0 for sector in sectors}
+    ordered_pieces = []
+
+    while sum(cursors[sector] < len(by_sector[sector]) for sector in sectors):
+        chunk_pieces = []
+        for index, sector in enumerate(sectors):
+            take = per_sector + (1 if index < remainder else 0)
+            start = cursors[sector]
+            stop = min(start + take, len(by_sector[sector]))
+            if stop > start:
+                chunk_pieces.append(by_sector[sector].iloc[start:stop])
+                cursors[sector] = stop
+
+        chunk = pd.concat(chunk_pieces, ignore_index=True) if chunk_pieces else frame.head(0).copy()
+        if len(chunk) < batch_size:
+            used = set(zip(chunk["tic_id"], chunk["sector"]))
+            refill_pieces = []
+            for sector in sectors:
+                remaining = by_sector[sector].iloc[cursors[sector]:].copy()
+                if remaining.empty:
+                    continue
+                remaining = remaining[
+                    ~remaining.apply(lambda row: (row["tic_id"], row["sector"]) in used, axis=1)
+                ]
+                needed = batch_size - len(chunk) - sum(len(piece) for piece in refill_pieces)
+                if needed <= 0:
+                    break
+                refill_pieces.append(remaining.head(needed))
+                cursors[sector] += min(needed, len(remaining))
+            if refill_pieces:
+                chunk = pd.concat([chunk, *refill_pieces], ignore_index=True)
+
+        if chunk.empty:
+            break
+        ordered_pieces.append(chunk)
+
+    if not ordered_pieces:
+        return frame.head(0).copy()
+    return pd.concat(ordered_pieces, ignore_index=True)
 
 
-def batch_sectors_arg(starter: Path, batch: Path, *, batch_size: int, balanced: bool, dry_run: bool) -> str:
+def batch_sectors_arg(
+    starter: Path,
+    batch: Path,
+    *,
+    batch_size: int,
+    batch_offset: int,
+    balanced: bool,
+    dry_run: bool,
+) -> str:
     if dry_run and starter.exists():
-        frame = select_batch(pd.read_csv(starter), batch_size=batch_size, balanced=balanced)
+        frame = select_batch(
+            pd.read_csv(starter),
+            batch_size=batch_size,
+            batch_offset=batch_offset,
+            balanced=balanced,
+        )
     elif batch.exists():
         frame = pd.read_csv(batch)
     elif starter.exists():
-        frame = select_batch(pd.read_csv(starter), batch_size=batch_size, balanced=balanced)
+        frame = select_batch(
+            pd.read_csv(starter),
+            batch_size=batch_size,
+            batch_offset=batch_offset,
+            balanced=balanced,
+        )
     else:
         raise FileNotFoundError(f"Cannot infer sectors without {starter} or {batch}.")
 
@@ -569,7 +663,7 @@ def build_download_plan_command(args) -> int:
     plan_rows = []
     for resource in selected.itertuples(index=False):
         script_text = fetch_manifest_script(str(resource.url), timeout=args.timeout)
-        script_path = DATA_ROOT / "manifests" / "scripts" / str(resource.script_name)
+        script_path = MANIFEST_SCRIPT_ROOT / str(resource.script_name)
         if not args.dry_run:
             script_path.parent.mkdir(parents=True, exist_ok=True)
             script_path.write_text(script_text, encoding="utf-8")
@@ -734,7 +828,7 @@ def stream_manifest_command(args) -> int:
             f"({resource.resource_type}, sector {resource.sector})",
             flush=True,
         )
-        script_path = DATA_ROOT / "manifests" / "scripts" / str(resource.script_name)
+        script_path = MANIFEST_SCRIPT_ROOT / str(resource.script_name)
 
         try:
             script_text = fetch_manifest_script(str(resource.url), timeout=args.timeout)

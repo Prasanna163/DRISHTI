@@ -21,11 +21,12 @@ if str(SRC) not in sys.path:
 
 from detection.run_bls import bin_phase_curve, fold_lightcurve, run_bls_search
 from preprocessing.clean_lightcurve import load_clean_flattened_lightcurve
+from drishti_store import DOWNLOAD_LC_ROOT, RESULT_PLOT_ROOT, RESULT_TABLE_ROOT
 
 
-DEFAULT_RECOVERY = ROOT / "outputs" / "tables" / "tce_recovery_results.csv"
-DEFAULT_FITS_DIR = ROOT / "data" / "raw" / "tce_products" / "lc"
-DEFAULT_OUTPUT_DIR = ROOT / "outputs" / "plots" / "tce_recovery"
+DEFAULT_RECOVERY = RESULT_TABLE_ROOT / "tce_recovery_results.csv"
+DEFAULT_FITS_DIR = DOWNLOAD_LC_ROOT
+DEFAULT_OUTPUT_DIR = RESULT_PLOT_ROOT / "tce_recovery"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -53,6 +54,11 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=10,
         help="Number of strongest direct recoveries to plot when --diagnostics controlled.",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Regenerate all plots even if they already exist on disk.",
     )
     return parser
 
@@ -83,8 +89,27 @@ def main(argv: list[str] | None = None) -> int:
         mode=args.diagnostics,
         top_direct=args.top_direct_diagnostics,
     )
-    print(f"Generating {len(diagnostic_rows)} target diagnostic plot(s)...", flush=True)
-    for row in tqdm(list(diagnostic_rows.itertuples(index=False)), desc="Diagnostic plots", unit="plot", file=sys.stdout):
+
+    # Skip plots that already exist on disk (unless --force)
+    skipped = 0
+    to_plot = []
+    for row in diagnostic_rows.itertuples(index=False):
+        recovery_class = getattr(row, "recovery_class", "")
+        if not recovery_class:
+            recovery_class = "direct_recovered" if bool(row.recovered_true_false) else "not_recovered"
+        safe_class = recovery_class.replace("/", "_")
+        expected_path = target_dir / safe_class / f"TIC_{int(row.tic_id)}_S{int(row.sector):04d}_recovery_diagnostic.png"
+        if not args.force and expected_path.exists():
+            skipped += 1
+            target_paths.append(expected_path)
+        else:
+            to_plot.append(row)
+
+    if skipped:
+        print(f"Skipping {skipped} existing diagnostic plot(s).", flush=True)
+    print(f"Generating {len(to_plot)} new target diagnostic plot(s)...", flush=True)
+
+    for row in tqdm(to_plot, desc="Diagnostic plots", unit="plot", file=sys.stdout):
         fits_path = find_lc_fits(args.fits_dir, int(row.tic_id), int(row.sector))
         if fits_path is None:
             continue
@@ -100,7 +125,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Summary plots: {len(summary_paths)}")
     for path in summary_paths:
         print(f"  {path.resolve()}")
-    print(f"Target diagnostics: {len(target_paths)}")
+    print(f"Target diagnostics: {len(target_paths)} ({skipped} skipped, {len(to_plot)} new)")
     print(f"Output directory: {args.output_dir.resolve()}")
     return 0
 

@@ -47,11 +47,47 @@ src/
   visualization/                  Plot helpers
 
 data/Ref/                         Local official TCE/CDPP reference CSVs
-data/drishti/                     Generated DRISHTI resource metadata and raw store
-outputs/                          Generated target lists, tables, plots, and diagnostics
+data/drishti/
+  catalogs/                       Scraped bulk indexes and metadata
+  targets/                        Selected TCE target lists and recovery batches
+  manifests/
+    scripts/                      Cached STScI .sh files while streaming
+    plans/                        Normalized file-level download plans
+  downloads/
+    lc/                           Light-curve FITS files
+    tp/                           Target-pixel FITS files
+    dv/                           DV products
+  results/
+    tables/                       Download, recovery, and status tables
+    plots/                        Summary plots and diagnostics
+  logs/                          Run logs
 ```
 
 Generated data and plots are intentionally ignored by git. Keep official/downloaded artifacts local unless making a deliberate data release.
+
+## Canonical Artifacts
+
+The active DRISHTI pipeline reads and writes generated artifacts under:
+
+```text
+data/drishti/
+```
+
+Older files under `outputs/target_lists/`, `outputs/tables/`, and `outputs/plots/` are legacy artifacts from earlier runs. They can be useful for historical comparison, but they should not be treated as the current source of truth. In particular, prefer:
+
+```text
+data/drishti/targets/
+data/drishti/results/tables/
+data/drishti/results/plots/
+```
+
+over similarly named files in `outputs/`.
+
+For a step-by-step usage and interpretation guide, see:
+
+```text
+docs/DRISHTI_WORKFLOW_GUIDE.md
+```
 
 ## Setup
 
@@ -89,7 +125,7 @@ python .\scripts\drishti.py discover
 This writes:
 
 ```text
-data/drishti/metadata/bulk_resource_index.csv
+data/drishti/catalogs/bulk_resource_index.csv
 ```
 
 The scraper reads the STScI Guest Investigator bulk-download page and the sector-wise FFI/TP/LC/DV bulk-download page.
@@ -105,9 +141,9 @@ python .\scripts\select_tce_targets.py
 Important outputs:
 
 ```text
-outputs/target_lists/tce_positive_targets.csv
-outputs/target_lists/tce_starter_validation_targets.csv
-outputs/target_lists/tce_first_recovery_batch.csv
+data/drishti/targets/tce_positive_targets.csv
+data/drishti/targets/tce_starter_validation_targets.csv
+data/drishti/targets/tce_first_recovery_batch.csv
 ```
 
 Run a dry-run of the controlled 50-row workflow:
@@ -132,21 +168,40 @@ python .\scripts\drishti.py tce-recovery `
   --download-method manifest
 ```
 
-That path streams sector manifests, downloads matching LC FITS files into `data/drishti/raw/lc/`, deletes each cached `.sh` after parsing, runs BLS recovery, and writes plots.
+That path streams sector manifests, downloads matching LC FITS files into `data/drishti/downloads/lc/`, deletes each cached `.sh` after parsing, runs BLS recovery, and writes plots.
+
+Run later chunks with `--batch-offset`. The first 100 rows use offset `0`; the next chunk starts at `100`; the one after that starts at `200`:
+
+```powershell
+python .\scripts\drishti.py tce-recovery `
+  --batch-size 100 `
+  --batch-offset 100 `
+  --balanced `
+  --products lc `
+  --download-method manifest
+```
+
+Offset-specific runs write separate files, for example:
+
+```text
+data/drishti/targets/tce_recovery_batch_100_offset_100.csv
+data/drishti/results/tables/tce_recovery_results_100_offset_100.csv
+data/drishti/results/plots/tce_recovery_100_offset_100/
+```
 
 Primary outputs:
 
 ```text
-outputs/target_lists/tce_recovery_batch_50.csv
-outputs/tables/tce_download_status_50.csv
-outputs/tables/tce_recovery_results_50.csv
-outputs/plots/tce_recovery_50/
+data/drishti/targets/tce_recovery_batch_50.csv
+data/drishti/results/tables/tce_download_status_50.csv
+data/drishti/results/tables/tce_recovery_results_50.csv
+data/drishti/results/plots/tce_recovery_50/
 ```
 
 In `--download-method manifest` mode, the download status table is:
 
 ```text
-outputs/drishti/tables/tce_manifest_download_status_50.csv
+data/drishti/results/tables/tce_manifest_download_status_50.csv
 ```
 
 The recovery table includes:
@@ -210,9 +265,9 @@ For the workflow where DRISHTI downloads one `.sh`, parses the matching LC URLs,
 python .\scripts\drishti.py stream-manifest `
   --resource-type light_curve `
   --sectors 1,2 `
-  --target-list outputs\target_lists\tce_recovery_batch_50.csv `
+  --target-list data\drishti\targets\tce_recovery_batch_50.csv `
   --products lc `
-  --status outputs\drishti\tables\stream_lc_status.csv
+  --status data\drishti\results\tables\stream_lc_status.csv
 ```
 
 Dry-run that same flow first:
@@ -221,7 +276,7 @@ Dry-run that same flow first:
 python .\scripts\drishti.py stream-manifest `
   --resource-type light_curve `
   --sectors 1,2 `
-  --target-list outputs\target_lists\tce_recovery_batch_50.csv `
+  --target-list data\drishti\targets\tce_recovery_batch_50.csv `
   --products lc `
   --limit 5 `
   --dry-run
@@ -235,7 +290,7 @@ Build a normalized download plan from a sector-wise LC cURL script:
 python .\scripts\drishti.py plan-manifest `
   --resource-type light_curve `
   --sectors 1 `
-  --target-list outputs\target_lists\tce_recovery_batch_50.csv `
+  --target-list data\drishti\targets\tce_recovery_batch_50.csv `
   --output data\drishti\manifests\plans\sector1_lc_plan.csv
 ```
 
@@ -252,28 +307,30 @@ Download from the plan with resume/status logging:
 ```powershell
 python .\scripts\drishti.py download-plan `
   --plan data\drishti\manifests\plans\sector1_lc_plan.csv `
-  --status outputs\drishti\tables\sector1_lc_status.csv
+  --status data\drishti\results\tables\sector1_lc_status.csv
 ```
 
 The downloader uses `.part` files, skips existing files, records status CSVs, and validates FITS files after download.
 
 ## Current Validation Snapshot
 
-The first controlled 50-row starter batch produced:
+The complete current starter validation set contains 111 target-sector rows under the default selector. A run requested with `--batch-size 143` produced 111 rows because only 111 starter rows are currently available.
+
+The latest complete starter run produced:
 
 ```text
-Evaluated: 50
-direct_recovered: 31
-alias_recovered: 3
-period_recovered_epoch_mismatch: 3
-period_recovered_bad_duration: 3
-not_recovered: 10
+Evaluated: 111
+direct_recovered: 76
+alias_recovered: 4
+period_recovered_epoch_mismatch: 4
+period_recovered_bad_duration: 5
+not_recovered: 22
 
-direct/alias recovered: 34 / 50 = 68.0%
-period recovered or vetting-worthy: 40 / 50 = 80.0%
+direct/alias recovered: 80 / 111 = 72.1%
+period recovered or vetting-worthy: 89 / 111 = 80.2%
 ```
 
-This means the base detector is alive. The next scientific work should focus on vetting evidence rather than simply adding a classifier.
+This means the base detector is alive. The next scientific work should focus on triaging the non-recovered and partial-recovered cases before changing the algorithm.
 
 ## Next Stage: Evidence Layer v1
 
@@ -300,6 +357,6 @@ The long-term goal is a multimodal candidate evidence dataset combining light-cu
 
 ## Notes
 
-- `outputs/`, downloaded FITS files, large TIC dumps, PDFs, and generated manifest caches are ignored by default.
+- `data/drishti/`, `outputs/`, downloaded FITS files, large TIC dumps, PDFs, and generated manifest caches are ignored by default.
 - Keep dry-runs small before starting large STScI downloads.
 - For LC-only recovery, `*_lc.fits` is sufficient. Pixel provenance work requires `*_tp.fits` and ideally DV XML/PDF products.
